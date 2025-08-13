@@ -94,7 +94,11 @@ jobs:
     - name: Check for source changes
       id: check_changes
       run: |
-        CHANGED=$(git diff --name-only HEAD~1 HEAD | grep -E '^(arch|drivers|include|kernel)/')
+        if git rev-parse HEAD~1 >/dev/null 2>&1; then
+          CHANGED=$(git diff --name-only HEAD~1 HEAD | grep -E '^(arch|drivers|include|kernel)/' || true)
+        else
+          CHANGED="all"
+        fi
         if [ -z "$CHANGED" ]; then
           echo "no_changes=true" >> $GITHUB_ENV
         else
@@ -146,7 +150,7 @@ jobs:
         prerelease: false
 
     - name: Upload kernel Image
-      if: ${{ hashFiles(format('{0}/Image.gz', env.OUT_DIR)) != '' }}
+      if: ${{ hashFiles(format('{0}/Image', env.OUT_DIR)) != '' }}
       uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
