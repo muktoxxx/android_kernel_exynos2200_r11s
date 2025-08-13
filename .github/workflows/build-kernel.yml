@@ -108,6 +108,7 @@ jobs:
             else
               echo "no_changes=false" >> $GITHUB_ENV
             fi
+          fi
 
       - name: Clean build if needed (defconfig-aware)
         run: |
@@ -163,7 +164,7 @@ jobs:
           prerelease: false
 
       - name: Upload kernel Image
-        if: ${{ hashFiles(format('{0}/Image.gz', env.OUT_DIR)) != '' }}
+        if: ${{ hashFiles(format('{0}/Image', env.OUT_DIR)) != '' }}
         uses: actions/upload-release-asset@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -185,12 +186,12 @@ jobs:
           asset_content_type: application/gzip
 
       - name: Upload flashable ZIP
-        if: ${{ hashFiles(format('AnyKernel3/{0}', env.ZIP_NAME)) != '' }}
+        if: ${{ hashFiles(format('{0}/{1}', env.ANYKERNEL_DIR, env.ZIP_NAME)) != '' }}
         uses: actions/upload-release-asset@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: AnyKernel3/${{ env.ZIP_NAME }}
+          asset_path: ${{ env.ANYKERNEL_DIR }}/${{ env.ZIP_NAME }}
           asset_name: ${{ env.ZIP_NAME }}
           asset_content_type: application/zip
