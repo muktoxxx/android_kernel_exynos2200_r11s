@@ -163,7 +163,7 @@ jobs:
           prerelease: false
 
       - name: Upload kernel Image
-        if: ${{ hashFiles(env.OUT_DIR + '/Image') != '' }}
+        if: ${{ hashFiles(format('{0}/ Image.gz', env.OUT_DIR)) != "}}
         uses: actions/upload-release-asset@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -174,7 +174,7 @@ jobs:
           asset_content_type: application/octet-stream
 
       - name: Upload kernel Image.gz
-        if: ${{ hashFiles(env.OUT_DIR + '/Image.gz') != '' }}
+        if: ${{ hashFiles(format('{0}/ Image.gz', env.OUT_DIR)) != "}}
         uses: actions/upload-release-asset@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -185,7 +185,7 @@ jobs:
           asset_content_type: application/gzip
 
       - name: Upload flashable ZIP
-        if: ${{ hashFiles('AnyKernel3/' + env.ZIP_NAME) != '' }}
+        if: ${{ hashFiles(format('AnyKernel3/ {0}', env.ZIP_NAME)) != " }}
         uses: actions/upload-release-asset@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
