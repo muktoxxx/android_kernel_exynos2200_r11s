@@ -1,4 +1,4 @@
-name: Build S23FE Kernel (Cached + Trigger-aware + Flashable ZIP)
+name: Build S23FE Kernel (Cached + Out-of-Tree + Flashable ZIP)
 
 on:
   push:
@@ -20,7 +20,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: true
-          fetch-depth: 0  # Needed for HEAD~1
+          fetch-depth: 0
 
       # Cache Clang
       - name: Cache Clang
@@ -80,17 +80,17 @@ jobs:
         if: steps.cache-build-tools.outputs.cache-hit != 'true'
         run: git clone https://android.googlesource.com/platform/prebuilts/build-tools ~/build-tools --depth=1
 
-      - name: Set up environment
+      - name: Set environment variables
         run: |
           echo "DIR=$(pwd)" >> $GITHUB_ENV
           echo "OUT_DIR=$(pwd)/out" >> $GITHUB_ENV
+          echo "ANYKERNEL_DIR=$(pwd)/AnyKernel3" >> $GITHUB_ENV
           echo "CROSS_COMPILE=~/clang-r416183b/bin/aarch64-linux-gnu-" >> $GITHUB_ENV
           echo "CC=~/clang-r416183b/bin/clang" >> $GITHUB_ENV
           echo "ARCH=arm64" >> $GITHUB_ENV
           echo "KERNEL_MAKE_ENV=LOCALVERSION=-v1.0 CCACHE=ccache" >> $GITHUB_ENV
-          echo "KBUILD_BUILD_USER=Muktox" >> $GITHUB_ENV
+          echo "KBUILD_BUILD_USER=Chanz22" >> $GITHUB_ENV
           echo "PATH=~/clang-r416183b/bin:~/build-tools/linux-x86/bin:~/gas-linux-x86:$PATH" >> $GITHUB_ENV
-          echo "VARIANT=r11s" >> $GITHUB_ENV
 
       - name: Determine if build needed
         run: |
@@ -108,9 +108,8 @@ jobs:
             else
               echo "no_changes=false" >> $GITHUB_ENV
             fi
-          fi
 
-      - name: Clean build if needed (defconfig-aware)
+      - name: Clean build if needed
         run: |
           if git rev-parse HEAD~1 >/dev/null 2>&1; then
             DEFCONFIG_CHANGED=$(git diff --name-only HEAD~1 HEAD -- | grep -E "^arch/arm64/configs/exynos2200_${VARIANT}_defconfig" || true)
@@ -119,35 +118,35 @@ jobs:
           fi
 
           if [ "${{ github.event_name }}" == "push" ] && ([ -n "$DEFCONFIG_CHANGED" ] || [ "${{ env.no_changes }}" != "true" ]); then
-              echo "Defconfig changed or major changes detected: cleaning build..."
-              make clean
-              make mrproper
-              rm -rf "$OUT_DIR"
+            echo "Cleaning build..."
+            make -C . O="$OUT_DIR" mrproper
           else
-              echo "Skipping clean: minor changes only or workflow_dispatch"
+            echo "Skipping clean"
           fi
 
       - name: Build kernel
         run: |
           mkdir -p "$OUT_DIR"
-          make -j$(nproc) exynos2200_${VARIANT}_defconfig
-          make -j$(nproc) $KERNEL_MAKE_ENV
-          make -j$(nproc) dtbs
+
+          # Defconfig with host gcc
+          make -j$(nproc) -C . O="$OUT_DIR" exynos2200_${VARIANT}_defconfig
+
+          # Kernel build with Clang cross-compiler
+          make -j$(nproc) -C . O="$OUT_DIR" CC="$CC" CROSS_COMPILE="$CROSS_COMPILE" $KERNEL_MAKE_ENV
+          make -j$(nproc) -C . O="$OUT_DIR" dtbs
+
+          # Create dtbo and dtb images
           mkdtimg cfg_create "$OUT_DIR/dtbo.img" dtconfigs/r11s.cfg -d arch/arm64/boot/dts/samsung/r11s
           mkdtimg cfg_create "$OUT_DIR/dtb.img" dtconfigs/exynos2200.cfg -d arch/arm64/boot/dts/exynos
-          [ -e arch/arm64/boot/Image.gz ] && cp arch/arm64/boot/Image.gz "$OUT_DIR"/
-          [ -e arch/arm64/boot/Image ] && cp arch/arm64/boot/Image "$OUT_DIR"/
-          ccache -s
 
       - name: Create flashable ZIP
         run: |
           cd $ANYKERNEL_DIR || exit 1
           rm -rf *.zip
-          cp "$DIR"/arch/arm64/boot/Image Image
-          cp "$OUT_DIR"/dtbo.img dtbo
-          cp "$OUT_DIR"/dtb.img dtb
-          KERNEL_VERSION=$(cat "$DIR"/include/config/kernel.release)
-          ZIP_NAME="${VARIANT}_kernel_${KERNEL_VERSION}_$(date +%Y_%m_%d).zip"
+          cp "$OUT_DIR/Image" Image
+          cp "$OUT_DIR/dtbo.img" dtbo
+          cp "$OUT_DIR/dtb.img" dtb
+          ZIP_NAME="${VARIANT}_kernel_$(cat "$DIR/include/config/kernel.release")_$(date '+%Y_%m_%d').zip"
           zip -r9 "$ZIP_NAME" * -x .git README.md *placeholder
           echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
           cd "$DIR"
@@ -192,6 +191,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ${{ env.ANYKERNEL_DIR }}/${{ env.ZIP_NAME }}
+          asset_path: ${{ ANYKERNEL_DIR }}/${{ env.ZIP_NAME }}
           asset_name: ${{ env.ZIP_NAME }}
           asset_content_type: application/zip
