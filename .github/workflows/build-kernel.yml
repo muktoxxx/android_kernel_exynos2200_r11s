@@ -1,4 +1,4 @@
-name: Build S23FE Kernel (Cached + Flashable ZIP)
+name: Build S23FE Kernel (Clang + Host GCC + Flashable ZIP)
 
 on:
   push:
@@ -10,7 +10,6 @@ env:
   VARIANT: r11s
   OUT_DIR: out
   ANYKERNEL_DIR: AnyKernel3
-  ZIP_NAME: ""  # Will be set after ZIP creation
 
 jobs:
   build:
@@ -21,7 +20,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: true
-          fetch-depth: 0
+          fetch-depth: 0  # Needed for HEAD~1 diff
 
       # Cache Clang
       - name: Cache Clang
@@ -65,59 +64,98 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y git ccache automake lzop gperf build-essential zip curl zlib1g-dev g++-multilib libxml2-utils bzip2 libbz2-dev libbz2-1.0 libghc-bzlib-dev squashfs-tools pngcrush schedtool dpkg-dev make optipng flex bison gcc clang lld libncurses-dev libssl-dev libelf-dev
+          sudo apt-get install -y \
+            git ccache automake lzop gperf build-essential gcc g++ clang lld \
+            zip curl zlib1g-dev g++-multilib libxml2-utils bzip2 libbz2-dev \
+            libghc-bzlib-dev squashfs-tools pngcrush schedtool dpkg-dev make \
+            optipng flex bison libncurses-dev libssl-dev libelf-dev
           ccache --max-size=5G
           ccache -z
 
-      # Download Clang
-      - name: Download Clang (if cache miss)
+      # Download Clang, GAS, Build Tools if cache miss
+      - name: Download Clang
         if: steps.cache-clang.outputs.cache-hit != 'true'
         run: git clone https://github.com/crdroidandroid/android_prebuilts_clang_host_linux-x86_clang-r416183b ~/clang-r416183b --depth=1
 
-      # Download GAS
-      - name: Download GAS (if cache miss)
+      - name: Download GAS
         if: steps.cache-gas.outputs.cache-hit != 'true'
         run: git clone https://android.googlesource.com/platform/prebuilts/gas/linux-x86 ~/gas-linux-x86 --depth=1
 
-      # Download Build Tools
-      - name: Download Build Tools (if cache miss)
+      - name: Download Build Tools
         if: steps.cache-build-tools.outputs.cache-hit != 'true'
         run: git clone https://android.googlesource.com/platform/prebuilts/build-tools ~/build-tools --depth=1
 
-      - name: Set up environment
+      # Set environment variables
+      - name: Set environment
         run: |
           echo "DIR=$(pwd)" >> $GITHUB_ENV
-          echo "CROSS_COMPILE=~/clang-r416183b/bin/aarch64-linux-gnu-" >> $GITHUB_ENV
-          echo "CC=~/clang-r416183b/bin/clang" >> $GITHUB_ENV
+          echo "OUT_DIR=$(pwd)/out" >> $GITHUB_ENV
+          echo "CROSS_COMPILE=aarch64-linux-gnu-" >> $GITHUB_ENV
+          echo "CC=clang" >> $GITHUB_ENV
           echo "ARCH=arm64" >> $GITHUB_ENV
           echo "KERNEL_MAKE_ENV=LOCALVERSION=-v1.0 CCACHE=ccache" >> $GITHUB_ENV
           echo "KBUILD_BUILD_USER=Muktox" >> $GITHUB_ENV
           echo "PATH=~/clang-r416183b/bin:~/build-tools/linux-x86/bin:~/gas-linux-x86:$PATH" >> $GITHUB_ENV
 
+      # Determine if build is needed
+      - name: Determine changes
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "no_changes=false" >> $GITHUB_ENV
+          else
+            if git rev-parse HEAD~1 >/dev/null 2>&1; then
+              CHANGED=$(git diff --name-only HEAD~1 HEAD | grep -E '^(arch|drivers|include|kernel)/' || true)
+            else
+              CHANGED="all"
+            fi
+            if [ -z "$CHANGED" ]; then
+              echo "no_changes=true" >> $GITHUB_ENV
+            else
+              echo "no_changes=false" >> $GITHUB_ENV
+            fi
+
+      # Clean build if needed
+      - name: Clean if defconfig changed
+        run: |
+          if git rev-parse HEAD~1 >/dev/null 2>&1; then
+            DEFCONFIG_CHANGED=$(git diff --name-only HEAD~1 HEAD -- | grep -E "^arch/arm64/configs/exynos2200_${VARIANT}_defconfig" || true)
+          else
+            DEFCONFIG_CHANGED="true"
+          fi
+          if [ "${{ github.event_name }}" == "push" ] && ([ -n "$DEFCONFIG_CHANGED" ] || [ "${{ env.no_changes }}" != "true" ]); then
+            make clean
+            make mrproper
+            rm -rf "$OUT_DIR"
+          fi
+
+      # Build kernel
       - name: Build kernel
         run: |
-          mkdir -p ${{ env.OUT_DIR }}
-          make -j$(nproc) exynos2200_${{ env.VARIANT }}_defconfig
+          mkdir -p "$OUT_DIR"
+          make -j$(nproc) exynos2200_${VARIANT}_defconfig
           make -j$(nproc) $KERNEL_MAKE_ENV
           make -j$(nproc) dtbs
-          mkdtimg cfg_create ${{ env.OUT_DIR }}/dtbo.img dtconfigs/r11s.cfg -d arch/arm64/boot/dts/samsung/r11s
-          mkdtimg cfg_create ${{ env.OUT_DIR }}/dtb.img dtconfigs/exynos2200.cfg -d arch/arm64/boot/dts/exynos
-          cp arch/arm64/boot/Image ${{ env.OUT_DIR }}/Image || true
-          cp arch/arm64/boot/Image.gz ${{ env.OUT_DIR }}/Image.gz || true
+          mkdtimg cfg_create "$OUT_DIR/dtbo.img" dtconfigs/r11s.cfg -d arch/arm64/boot/dts/samsung/r11s
+          mkdtimg cfg_create "$OUT_DIR/dtb.img" dtconfigs/exynos2200.cfg -d arch/arm64/boot/dts/exynos
+          [ -e arch/arm64/boot/Image.gz ] && cp arch/arm64/boot/Image.gz "$OUT_DIR"/
+          [ -e arch/arm64/boot/Image ] && cp arch/arm64/boot/Image "$OUT_DIR"/
           ccache -s
 
+      # Create flashable ZIP
       - name: Create flashable ZIP
         run: |
           cd ${{ env.ANYKERNEL_DIR }} || exit 1
           rm -rf *.zip
-          cp ${{ env.OUT_DIR }}/Image Image
-          cp ${{ env.OUT_DIR }}/dtbo.img dtbo
-          cp ${{ env.OUT_DIR }}/dtb.img dtb
-          ZIP_NAME="${{ env.VARIANT }}_kernel_$(cat ../include/config/kernel.release)_$(date '+%Y_%m_%d').zip"
+          cp "${{ env.DIR }}/arch/arm64/boot/Image" Image
+          cp "${{ env.OUT_DIR }}/dtbo.img" dtbo
+          cp "${{ env.OUT_DIR }}/dtb.img" dtb
+          KERNEL_VERSION=$(cat "${{ env.DIR }}/include/config/kernel.release")
+          ZIP_NAME="${VARIANT}_kernel_${KERNEL_VERSION}_$(date +%Y_%m_%d).zip"
           zip -r9 "$ZIP_NAME" * -x .git README.md *placeholder
           echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
-          cd ..
+          cd "${{ env.DIR }}" || exit 1
 
+      # Create GitHub release
       - name: Create GitHub Release
         id: create_release
         uses: actions/create-release@v1
@@ -128,6 +166,29 @@ jobs:
           release_name: Kernel Release ${{ github.ref_name }}
           draft: false
           prerelease: false
+
+      # Upload assets
+      - name: Upload kernel Image
+        if: ${{ hashFiles(format('{0}/Image', env.OUT_DIR)) != '' }}
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ${{ env.OUT_DIR }}/Image
+          asset_name: Image
+          asset_content_type: application/octet-stream
+
+      - name: Upload kernel Image.gz
+        if: ${{ hashFiles(format('{0}/Image.gz', env.OUT_DIR)) != '' }}
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ${{ env.OUT_DIR }}/Image.gz
+          asset_name: Image.gz
+          asset_content_type: application/gzip
 
       - name: Upload flashable ZIP
         if: ${{ hashFiles(format('{0}/{1}', env.ANYKERNEL_DIR, env.ZIP_NAME)) != '' }}
