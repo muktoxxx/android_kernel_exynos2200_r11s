@@ -1,49 +1,103 @@
-name: Kernel Compilation
+name: Build & Release Kernel
 
 on:
   workflow_dispatch:
-    inputs:      
-      tag:
-        description: 'Release Tag'
-        required: true    
+  push:
+    branches:
+      - main
+      - master
 
 jobs:
-  build:
+  build-and-release:
     runs-on: ubuntu-22.04
 
     steps:
-    - name: Checkout source
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 1
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
 
-    - name: Set up build environment
-      run: |
-        sudo apt update -y  
-        sudo apt install libncurses5-dev -y
-        wget http://security.ubuntu.com/ubuntu/pool/universe/n/ncurses/libtinfo5_6.3-2ubuntu0.1_amd64.deb && sudo dpkg -i libtinfo5_6.3-2ubuntu0.1_amd64.deb
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install git ccache automake lzop gperf build-essential zip curl zlib1g-dev g++-multilib libxml2-utils bzip2 libbz2-dev libbz2-1.0 libghc-bzlib-dev squashfs-tools pngcrush schedtool dpkg-dev make optipng flex bison gcc clang lld libncurses-dev libssl-dev libelf-dev -y
 
-    - name: Set environment variable
-      run: |
-        echo "BUILD_KERNEL_VERSION=${{ github.event.inputs.tag }}" >> $GITHUB_ENV        
+      - name: Set up environment
+        run: |
+          git submodule update --init --recursive
+          export DIR="$(pwd)"
+          export PARENT_DIR="$(readlink -f "$DIR/..")"
+          export PATH="$PARENT_DIR/clang-r416183b/bin:$PARENT_DIR/build-tools/path/linux-x86:$PARENT_DIR/gas/linux-x86:$PATH"
+          export CROSS_COMPILE="$PARENT_DIR/clang-r416183b/bin/aarch64-linux-gnu-"
+          export CC="$PARENT_DIR/clang-r416183b/bin/clang"
+          export ARCH=arm64
+          export LLVM=1
+          export LLVM_IAS=1
+          echo "Environment variables set"
 
-    - name: Compile Kernel
-      run: |
-        bash build_kernel.sh
+      - name: Prepare toolchains and support dirs
+        run: |
+          # Clone prebuilt Clang, GAS, and build-tools if they don't exist
+          [ ! -d ../clang-r416183b ] && git clone https://github.com/crdroidandroid/android_prebuilts_clang_host_linux-x86_clang-r416183b ../clang-r416183b
+          [ ! -d ../gas/linux-x86 ] && git clone https://android.googlesource.com/platform/prebuilts/gas/linux-x86 ../gas/linux-x86
+          [ ! -d ../build-tools ] && git clone https://android.googlesource.com/platform/prebuilts/build-tools ../build-tools
 
-    - name: Upload Artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: KernelSU-Next-SM-S711B-${{ github.event.inputs.tag }}
-        path: build/*.tar
+      - name: Build all variants and make ZIP
+        run: |
+          set -e
 
-    - name: Create release
-      uses: ncipollo/release-action@v1
-      with:
-        tag: ${{ github.event.inputs.tag }}
-        name: "KernelSU-Next-SM-S711B-${{ github.event.inputs.tag }}"
-        draft: false
-        prerelease: false
-        token: ${{ secrets.TOKEN }}          
-        artifacts: "build/*.tar"
-        body: "Commit SHA: ${{ github.sha }}"
+          DIR="$(pwd)"
+          OUT_DIR="$DIR/out"
+
+          # Find all variant defconfigs
+          configs=($(ls arch/arm64/configs/exynos2200_r11s_defconfig*))
+          for config in "${configs[@]}"; do
+            VARIANT=$(basename "$config" | cut -d'_' -f2)
+            echo "Building variant: $VARIANT"
+            
+            # Clean before build
+            make clean && make mrproper
+            rm -rf out
+            mkdir -p "$OUT_DIR"
+            
+            # Build kernel and dtbs
+            make -j$(nproc) LOCALVERSION=-v1.0 "exynos2200_${VARIANT}_defconfig" "JollyKernel.config" dtbs
+            make -j$(nproc) LOCALVERSION=-v1.0
+
+            # Generate dtbo and dtb images (if mkdtimg present)
+            if [ -x ./toolchain/mkdtimg ]; then
+              ./toolchain/mkdtimg cfg_create out/dtbo.img dtconfigs/r11s.cfg -d arch/arm64/boot/dts/samsung/r11s
+              ./toolchain/mkdtimg cfg_create out/dtb.img dtconfigs/exynos2200.cfg -d arch/arm64/boot/dts/exynos
+            fi
+
+            # Copy Image
+            [ -e arch/arm64/boot/Image ] && cp arch/arm64/boot/Image "$OUT_DIR/Image"
+
+            # Build AnyKernel3 zip if AnyKernel3 present
+            if [ -d AnyKernel3 ]; then
+              cd AnyKernel3
+              rm -rf *.zip
+              cp "$DIR/arch/arm64/boot/Image" Image
+              [ -e "$DIR/out/dtbo.img" ] && cp "$DIR/out/dtbo.img" dtbo
+              [ -e "$DIR/out/dtb.img" ] && cp "$DIR/out/dtb.img" dtb
+              ZIPNAME="${VARIANT}_kernel_$(cat "$DIR/include/config/kernel.release")_$(date '+%Y_%m_%d').zip"
+              zip -r9 "$ZIPNAME" * -x .git README.md *placeholder
+              mv "$ZIPNAME" "$OUT_DIR/"
+              cd "$DIR"
+            fi
+          done
+
+      - name: Upload Artifacts (Image, dtbo.img, dtb.img, zip)
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-builds
+          path: |
+            out/*.zip
+            out/Image
+            out/dtb.img
+            out/dtbo.img
+
+      - name: Create GitHub Release & Upload
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
