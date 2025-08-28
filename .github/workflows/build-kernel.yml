@@ -18,20 +18,10 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install git ccache automake lzop gperf build-essential zip curl zlib1g-dev g++-multilib libxml2-utils bzip2 libbz2-dev libbz2-1.0 libghc-bzlib-dev squashfs-tools pngcrush schedtool dpkg-dev make optipng flex bison gcc clang lld libncurses-dev libssl-dev libelf-dev -y
-
-      - name: Set up environment
-        run: |
-          git submodule update --init --recursive
-          export DIR="$(pwd)"
-          export PARENT_DIR="$(readlink -f "$DIR/..")"
-          export PATH="$PARENT_DIR/clang-r416183b/bin:$PARENT_DIR/build-tools/path/linux-x86:$PARENT_DIR/gas/linux-x86:$PATH"
-          export CROSS_COMPILE="$PARENT_DIR/clang-r416183b/bin/aarch64-linux-gnu-"
-          export CC="$PARENT_DIR/clang-r416183b/bin/clang"
-          export ARCH=arm64
-          export LLVM=1
-          export LLVM_IAS=1
-          echo "Environment variables set"
+          sudo apt-get install -y git ccache automake lzop gperf build-essential zip curl \
+            zlib1g-dev g++-multilib libxml2-utils bzip2 libbz2-dev libbz2-1.0 libghc-bzlib-dev \
+            squashfs-tools pngcrush schedtool dpkg-dev make optipng flex bison gcc clang lld \
+            libncurses-dev libssl-dev libelf-dev
 
       - name: Prepare toolchains and support dirs
         run: |
@@ -41,26 +31,34 @@ jobs:
           [ ! -d ../build-tools ] && git clone https://android.googlesource.com/platform/prebuilts/build-tools ../build-tools
 
       - name: Build all variants and make ZIP
+        shell: bash
         run: |
           set -e
 
-          DIR="$(pwd)"
+          export DIR="$(pwd)"
+          export PARENT_DIR="$(readlink -f "$DIR/..")"
+          export PATH="$PARENT_DIR/clang-r416183b/bin:$PARENT_DIR/build-tools/path/linux-x86:$PARENT_DIR/gas/linux-x86:$PATH"
+          export CROSS_COMPILE="$PARENT_DIR/clang-r416183b/bin/aarch64-linux-gnu-"
+          export CC="$PARENT_DIR/clang-r416183b/bin/clang"
+          export ARCH=arm64
+          export LLVM=1
+          export LLVM_IAS=1
+
           OUT_DIR="$DIR/out"
 
-          # Find all variant defconfigs
           configs=($(ls arch/arm64/configs/exynos2200_r11s_defconfig*))
           for config in "${configs[@]}"; do
             VARIANT=$(basename "$config" | cut -d'_' -f2)
             echo "Building variant: $VARIANT"
-            
-            # Clean before build
-            make clean && make mrproper
-            rm -rf out
+
+            make clean
+            make mrproper
+            rm -rf "$OUT_DIR"
             mkdir -p "$OUT_DIR"
-            
-            # Build kernel and dtbs
-            make -j$(nproc) LOCALVERSION=-v1.0 "exynos2200_${VARIANT}_defconfig" "JollyKernel.config" dtbs
-            make -j$(nproc) LOCALVERSION=-v1.0
+
+            # Build kernel and dtbs explicitly with ARCH
+            make -j$(nproc) ARCH=arm64 LOCALVERSION=-v1.0 "exynos2200_${VARIANT}_defconfig" "JollyKernel.config" dtbs
+            make -j$(nproc) ARCH=arm64 LOCALVERSION=-v1.0
 
             # Generate dtbo and dtb images (if mkdtimg present)
             if [ -x ./toolchain/mkdtimg ]; then
@@ -68,10 +66,10 @@ jobs:
               ./toolchain/mkdtimg cfg_create out/dtb.img dtconfigs/exynos2200.cfg -d arch/arm64/boot/dts/exynos
             fi
 
-            # Copy Image
+            # Copy Image to output
             [ -e arch/arm64/boot/Image ] && cp arch/arm64/boot/Image "$OUT_DIR/Image"
 
-            # Build AnyKernel3 zip if AnyKernel3 present
+            # Build AnyKernel3 zip if AnyKernel3 directory exists
             if [ -d AnyKernel3 ]; then
               cd AnyKernel3
               rm -rf *.zip
